@@ -1,50 +1,6 @@
-<#
-.SYNOPSIS
-    Proaction Remediation script for CloudLAPS solution used within Endpoint Analytics with Microsoft Endpoint Manager to rotate a local administrator password.
-
-.DESCRIPTION
-    This is the remediation script for a Proactive Remediation in Endpoint Analytics used by the CloudLAPS solution.
-    
-    It will create a new local administrator account if it doesn't already exist on the device and call an Azure Function API defined in the
-    script that will generate a new password, update a Secret in a defined Azure Key Vault and respond back with password to be either set or
-    updated on the defined local administrator account.
-
-.NOTES
-    FileName:    Remediate.ps1
-    Author:      Nickolaj Andersen
-    Contact:     @NickolajA
-    Created:     2020-09-14
-    Updated:     2022-10-16
-
-    Version history:
-    1.0.0 - (2020-09-14) Script created.
-    1.0.1 - (2021-10-07) Updated with output for extended details in MEM portal.
-    1.0.2 - (2022-01-01) Updated virtual machine array with 'Google Compute Engine'.
-    1.1.0 - (2022-01-08) Added support for new SendClientEvent function to send client events related to passwor rotation.
-    1.1.1 - (2022-01-27) Added validation check to test if device is either AAD joined or Hybrid Azure AD joined.
-    1.1.2 - (2022-09-15) Support for detecting the device registration certificate based on deviceId instead of thumbprint data in JoinInfo key.
-    1.2.0 - (2022-10-16) Added support to enforce password rotation of an existing device in CloudLAPS, after it has been re-provisioned.
-                         Also extended the main try and catch with additional HTTP response codes for more detailed error messages.
-#>
 Process {
     # Functions
     function Test-AzureADDeviceRegistration {
-        <#
-        .SYNOPSIS
-            Determine if the device conforms to the requirement of being either Azure AD joined or Hybrid Azure AD joined.
-        
-        .DESCRIPTION
-            Determine if the device conforms to the requirement of being either Azure AD joined or Hybrid Azure AD joined.
-        
-        .NOTES
-            Author:      Nickolaj Andersen
-            Contact:     @NickolajA
-            Created:     2022-01-27
-            Updated:     2022-01-27
-        
-            Version history:
-            1.0.0 - (2022-01-27) Function created
-        #>
         Process {
             $AzureADJoinInfoRegistryKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo"
             if (Test-Path -Path $AzureADJoinInfoRegistryKeyPath) {
@@ -57,23 +13,6 @@ Process {
     }
 
     function Get-AzureADDeviceID {
-        <#
-        .SYNOPSIS
-            Get the Azure AD device ID from the local device.
-        
-        .DESCRIPTION
-            Get the Azure AD device ID from the local device.
-        
-        .NOTES
-            Author:      Nickolaj Andersen
-            Contact:     @NickolajA
-            Created:     2021-05-26
-            Updated:     2021-05-26
-        
-            Version history:
-            1.0.0 - (2021-05-26) Function created
-            1.0.1 - (2022-09-15) Support for detecting the device registration certificate based on deviceId instead of thumbprint data in JoinInfo key
-        #>
         Process {
             # Define Cloud Domain Join information registry path
             $AzureADJoinInfoRegistryKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo"
@@ -86,14 +25,14 @@ Process {
                     $AzureADJoinCertificate = Get-ChildItem -Path "Cert:\LocalMachine\My" -Recurse | Where-Object { $PSItem.Subject -like "CN=$($AzureADJoinInfoKey)" }
                 }
                 else {
-                    $AzureADJoinCertificate = Get-ChildItem -Path "Cert:\LocalMachine\My" -Recurse | Where-Object { $PSItem.Thumbprint -eq $AzureADJoinInfoKey }    
+                    $AzureADJoinCertificate = Get-ChildItem -Path "Cert:\LocalMachine\My" -Recurse | Where-Object { $PSItem.Thumbprint -eq $AzureADJoinInfoKey }
                 }
 
                 # Retrieve the machine certificate based on thumbprint from registry key
                 if ($AzureADJoinCertificate -ne $null) {
                     # Determine the device identifier from the subject name
                     $AzureADDeviceID = ($AzureADJoinCertificate | Select-Object -ExpandProperty "Subject") -replace "CN=", ""
-                    
+
                     # Write event log entry with DeviceId
                     Write-EventLog -LogName $EventLogName -Source $EventLogSource -EntryType Information -EventId 51 -Message "CloudLAPS: Azure AD device identifier: $($AzureADDeviceID)"
 
@@ -105,32 +44,14 @@ Process {
     }
 
     function Get-AzureADRegistrationCertificateThumbprint {
-    <#
-    .SYNOPSIS
-        Get the thumbprint of the certificate used for Azure AD device registration.
-    
-    .DESCRIPTION
-        Get the thumbprint of the certificate used for Azure AD device registration.
-    
-    .NOTES
-        Author:      Nickolaj Andersen
-        Contributor: @JankeSkanke
-        Contact:     @NickolajA
-        Created:     2021-06-03
-        Updated:     2022-26-10
-    
-        Version history:
-        1.0.0 - (2021-06-03) Function created
-        1.1.0 - (2022-26-10) Added support for finding thumbprint for Cloud PCs @JankeSkanke
-    #>
     Process {
         # Define Cloud Domain Join information registry path
         $AzureADJoinInfoRegistryKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo"
         # Retrieve the child key name that is the thumbprint of the machine certificate containing the device identifier guid
         $AzureADJoinInfoKey = Get-ChildItem -Path $AzureADJoinInfoRegistryKeyPath | Select-Object -ExpandProperty "PSChildName"
-         # Retrieve the machine certificate based on thumbprint from registry key or Certificate (CloudPC)        
+         # Retrieve the machine certificate based on thumbprint from registry key or Certificate (CloudPC)
         if ($AzureADJoinInfoKey -ne $null) {
-            # Match key data against GUID regex for CloudPC Support 
+            # Match key data against GUID regex for CloudPC Support
             if ([guid]::TryParse($AzureADJoinInfoKey, $([ref][guid]::Empty))) {
                 #This is for CloudPC
                 $AzureADJoinCertificate = Get-ChildItem -Path "Cert:\LocalMachine\My" -Recurse | Where-Object { $PSItem.Subject -like "CN=$($AzureADJoinInfoKey)" }
@@ -145,38 +66,13 @@ Process {
         return $AzureADJoinInfoThumbprint
     }
 }
-    
+
     function New-RSACertificateSignature {
-        <#
-        .SYNOPSIS
-            Creates a new signature based on content passed as parameter input using the private key of a certificate determined by it's thumbprint, to sign the computed hash of the content.
-        
-        .DESCRIPTION
-            Creates a new signature based on content passed as parameter input using the private key of a certificate determined by it's thumbprint, to sign the computed hash of the content.
-            The certificate used must be available in the LocalMachine\My certificate store, and must also contain a private key.
-    
-        .PARAMETER Content
-            Specify the content string to be signed.
-    
-        .PARAMETER Thumbprint
-            Specify the thumbprint of the certificate.
-        
-        .NOTES
-            Author:      Nickolaj Andersen / Thomas Kurth
-            Contact:     @NickolajA
-            Created:     2021-06-03
-            Updated:     2021-06-03
-        
-            Version history:
-            1.0.0 - (2021-06-03) Function created
-    
-            Credits to Thomas Kurth for sharing his original C# code.
-        #>
         param(
             [parameter(Mandatory = $true, HelpMessage = "Specify the content string to be signed.")]
             [ValidateNotNullOrEmpty()]
             [string]$Content,
-    
+
             [parameter(Mandatory = $true, HelpMessage = "Specify the thumbprint of the certificate.")]
             [ValidateNotNullOrEmpty()]
             [string]$Thumbprint
@@ -188,27 +84,27 @@ Process {
                 if ($Certificate.HasPrivateKey -eq $true) {
                     # Read the RSA private key
                     $RSAPrivateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
-                    
+
                     if ($RSAPrivateKey -ne $null) {
                         if ($RSAPrivateKey -is [System.Security.Cryptography.RSACng]) {
                             # Construct a new SHA256Managed object to be used when computing the hash
                             $SHA256Managed = New-Object -TypeName "System.Security.Cryptography.SHA256Managed"
-    
+
                             # Construct new UTF8 unicode encoding object
                             $UnicodeEncoding = [System.Text.UnicodeEncoding]::UTF8
-    
+
                             # Convert content to byte array
                             [byte[]]$EncodedContentData = $UnicodeEncoding.GetBytes($Content)
-    
+
                             # Compute the hash
                             [byte[]]$ComputedHash = $SHA256Managed.ComputeHash($EncodedContentData)
-    
+
                             # Create signed signature with computed hash
                             [byte[]]$SignatureSigned = $RSAPrivateKey.SignHash($ComputedHash, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    
+
                             # Convert signature to Base64 string
                             $SignatureString = [System.Convert]::ToBase64String($SignatureSigned)
-                            
+
                             # Handle return value
                             return $SignatureString
                         }
@@ -217,30 +113,8 @@ Process {
             }
         }
     }
-    
+
     function Get-PublicKeyBytesEncodedString {
-        <#
-        .SYNOPSIS
-            Returns the public key byte array encoded as a Base64 string, of the certificate where the thumbprint passed as parameter input is a match.
-        
-        .DESCRIPTION
-            Returns the public key byte array encoded as a Base64 string, of the certificate where the thumbprint passed as parameter input is a match.
-            The certificate used must be available in the LocalMachine\My certificate store.
-    
-        .PARAMETER Thumbprint
-            Specify the thumbprint of the certificate.
-        
-        .NOTES
-            Author:      Nickolaj Andersen / Thomas Kurth
-            Contact:     @NickolajA
-            Created:     2021-06-07
-            Updated:     2021-06-07
-        
-            Version history:
-            1.0.0 - (2021-06-07) Function created
-    
-            Credits to Thomas Kurth for sharing his original C# code.
-        #>
         param(
             [parameter(Mandatory = $true, HelpMessage = "Specify the thumbprint of the certificate.")]
             [ValidateNotNullOrEmpty()]
@@ -252,7 +126,7 @@ Process {
             if ($Certificate -ne $null) {
                 # Get the public key bytes
                 [byte[]]$PublicKeyBytes = $Certificate.GetPublicKey()
-    
+
                 # Handle return value
                 return [System.Convert]::ToBase64String($PublicKeyBytes)
             }
@@ -260,23 +134,6 @@ Process {
     }
 
     function Get-ComputerSystemType {
-        <#
-        .SYNOPSIS
-            Get the computer system type, either VM or NonVM.
-        
-        .DESCRIPTION
-            Get the computer system type, either VM or NonVM.
-        
-        .NOTES
-            Author:      Nickolaj Andersen
-            Contact:     @NickolajA
-            Created:     2021-06-07
-            Updated:     2022-01-01
-        
-            Version history:
-            1.0.0 - (2021-06-07) Function created
-            1.0.1 - (2022-01-01) Updated virtual machine array with 'Google Compute Engine'
-        #>
         Process {
             # Check if computer system type is virtual
             $ComputerSystemModel = Get-WmiObject -Class "Win32_ComputerSystem" | Select-Object -ExpandProperty "Model"
@@ -293,15 +150,15 @@ Process {
     }
 
     # Define the local administrator user name
-    $LocalAdministratorName = "<Enter the name of the local administrator account>"
+    $LocalAdministratorName = "localAdmin"
 
     # Construct the required URI for the Azure Function URL
-    $SetSecretURI = "<Enter Azure Functions URI for SetSecret function>"
-    $SendClientEventURI = "<Enter Azure Functions URI for SendClientEvent function>"
+    $SetSecretURI = "https://oshrcazclouldlapsfunction.azurewebsites.net/api/SetSecret?code=paGq2cxvyjdy2VJ0wuJa8nEbiiFrHQbJ2BuIQ9BoyNBkAzFuAS-ohA=="
+    $SendClientEventURI = "https://oshrcazclouldlapsfunction.azurewebsites.net/api/SendClientEvent?code=atu79Wjgr1eJNrfY_4OY6XqxwGJIqWRDP0DyQtEsG-rmAzFu17lG8w=="
 
     # Control whether client-side events should be sent to Log Analytics workspace
     # Set to $true to enable this feature
-    $SendClientEvent = $false
+    $SendClientEvent = $true
 
     # Define event log variables
     $EventLogName = "CloudLAPS-Client"
@@ -341,7 +198,7 @@ Process {
             SerialNumber = if (-not([string]::IsNullOrEmpty($SerialNumber)) -and ($SerialNumber -ne "System Serial Number")) { $SerialNumber } else { $env:COMPUTERNAME } # fall back to computer name if serial number is not present or equals "System Serial Number"
             Signature = $Signature
             Thumbprint = $CertificateThumbprint
-            PublicKey = $PublicKeyBytesEncoded        
+            PublicKey = $PublicKeyBytesEncoded
             PasswordRotationResult = ""
             DateTimeUtc = (Get-Date).ToUniversalTime().ToString()
             ClientEventMessage = ""
@@ -361,7 +218,7 @@ Process {
             $LocalAdministratorAccount = Get-LocalUser -Name $LocalAdministratorName -ErrorAction SilentlyContinue
 
             # Amend header table if local administrator account doesn't exist, enforce password creation for devices that were previously provisioned, but have been re-provisioned
-            if ($LocalAdministratorAccount -eq $null) {
+            if ($null -eq $LocalAdministratorAccount) {
                 $SetSecretHeaderTable["SecretUpdateOverride"] = $true
             }
 
@@ -376,7 +233,7 @@ Process {
                 # Convert password returned from Azure Function API call to secure string
                 $SecurePassword = ConvertTo-SecureString -String $APIResponse -AsPlainText -Force
 
-                if ($LocalAdministratorAccount -eq $null) {
+                if ($null -eq $LocalAdministratorAccount) {
                     # Create local administrator account
                     try {
                         Write-EventLog -LogName $EventLogName -Source $EventLogSource -EntryType Information -EventId 20 -Message "CloudLAPS: Local administrator account does not exist, attempt to create it"
@@ -413,7 +270,7 @@ Process {
                         else {
                             Set-LocalUser -Name $LocalAdministratorName -Password $SecurePassword -PasswordNeverExpires $true -UserMayChangePassword $false -ErrorAction Stop
                         }
-                        
+
                         # Handle output for extended details in MEM portal
                         $ExtendedOutput = "PasswordRotated"
                     }
@@ -430,7 +287,7 @@ Process {
                     try {
                         # Call Azure Functions SendClientEvent API to post client event
                         $APIResponse = Invoke-RestMethod -Method "POST" -Uri $SendClientEventURI -Body ($SendClientEventHeaderTable | ConvertTo-Json) -ContentType "application/json" -ErrorAction Stop
-        
+
                         Write-EventLog -LogName $EventLogName -Source $EventLogSource -EntryType Information -EventId 50 -Message "CloudLAPS: Successfully sent client event to API. Message: $($SendClientEventHeaderTable["ClientEventMessage"])"
                     }
                     catch [System.Exception] {
@@ -505,7 +362,7 @@ Process {
                 catch [System.Exception] {
                     Write-EventLog -LogName $EventLogName -Source $EventLogSource -EntryType Error -EventId 53 -Message "CloudLAPS: Failed to send client event to API. Error message: $($PSItem.Exception.Message)"; $ExitCode = 1
                 }
-            }        
+            }
         }
     }
     else {
